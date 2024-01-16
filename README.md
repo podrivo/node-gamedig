@@ -1,3 +1,5 @@
+> Temporary solution. Will be unpublished/deprecated once the original is up to date.
+
 node-GameDig - Game Server Query Library
 ---
 node-GameDig is a game server query library, capable of querying for the status of

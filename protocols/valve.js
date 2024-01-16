@@ -138,6 +138,10 @@ class Valve extends Core {
             if (state.raw.tags) {
                 state.raw.dlcEnabled = false
                 state.raw.firstPerson = false
+                state.raw.privateHive = false
+                state.raw.external = false
+                state.raw.official = false
+
                 for (const tag of state.raw.tags) {
                     if (tag.startsWith('lqs')) {
                         const value = parseInt(tag.replace('lqs', ''));
@@ -150,6 +154,12 @@ class Valve extends Core {
                     }
                     if (tag.includes('isDLC')) {
                         state.raw.dlcEnabled = true;
+                    }
+                    if (tag.includes('privHive')) {
+                      state.raw.privateHive = true;
+                    }
+                    if (tag.includes('external')) {
+                      state.raw.external = true;
                     }
                     if (tag.includes(':')) {
                         state.raw.time = tag;
@@ -166,6 +176,10 @@ class Valve extends Core {
                             state.raw.nightAcceleration = value;
                         }
                     }
+                }
+
+                if (!state.raw.external && !state.raw.privateHive) {
+                  state.raw.official = true
                 }
             }
         }
@@ -209,7 +223,7 @@ class Valve extends Core {
             true
         );
 
-        if (b === null) {
+        if (b === null && !this.options.requestPlayersRequired) {
             // Player query timed out
             // CSGO doesn't respond to player query if host_players_show is not 2
             // Conan Exiles never responds to player query
@@ -226,9 +240,6 @@ class Valve extends Core {
             const time = reader.float();
 
             this.debugLog("Found player: "+name+" "+score+" "+time);
-
-            // connecting players don't count as players.
-            if(!name) continue;
 
             // CSGO sometimes adds a bot named 'Max Players' if host_players_show is not 2
             if (state.raw.appId === AppId.CSGO && name === 'Max Players') continue;
@@ -257,7 +268,7 @@ class Valve extends Core {
 
         if (this.goldsrcInfo) {
             const b = await this.udpSend('\xff\xff\xff\xffrules', b=>b, ()=>null);
-            if (b === null) return; // timed out - the server probably has rules disabled
+            if (b === null && !this.options.requestRulesRequired) return; // timed out - the server probably has rules disabled
             const reader = this.reader(b);
             while (!reader.done()) {
                 const key = reader.string();
@@ -266,7 +277,7 @@ class Valve extends Core {
             }
         } else {
             const b = await this.sendPacket(0x56,null,0x45,true);
-            if (b === null) return; // timed out - the server probably has rules disabled
+            if (b === null && !this.options.requestRulesRequired) return; // timed out - the server probably has rules disabled
 
             let dayZPayloadEnded = false;
 
@@ -416,22 +427,22 @@ class Valve extends Core {
     async cleanup(/** Results */ state) {
         // Organize players / hidden players into player / bot arrays
         const botProbability = (p) => {
-            if (p.time === -1) return Number.MAX_VALUE;
-            return p.time;
-        };
-        const sortedPlayers = state.raw.players.sort((a,b) => {
-            return botProbability(a) - botProbability(b);
-        });
-        delete state.raw.players;
-        const numBots = state.raw.numbots || 0;
-        const numPlayers = state.raw.numplayers - numBots;
-        while(state.bots.length < numBots) {
-            if (sortedPlayers.length) state.bots.push(sortedPlayers.pop());
-            else state.bots.push({});
+            if (p.time === -1) return Number.MAX_VALUE
+            return p.time
         }
-        while(state.players.length < numPlayers || sortedPlayers.length) {
-            if (sortedPlayers.length) state.players.push(sortedPlayers.pop());
-            else state.players.push({});
+
+        const rawPlayers = [...state.raw.players]
+        const sortedPlayers = rawPlayers.sort((a, b) => {
+            return botProbability(a) - botProbability(b)
+        })
+
+        const numBots = state.raw.numbots || 0
+
+        while (state.bots.length < numBots && sortedPlayers.length) {
+            state.bots.push(sortedPlayers.pop())
+        }
+        while ((state.players.length < state.numplayers - numBots || sortedPlayers.length) && sortedPlayers.length) {
+            state.players.push(sortedPlayers.pop())
         }
     }
 

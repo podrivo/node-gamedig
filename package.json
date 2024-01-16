@@ -1,5 +1,5 @@
 {
-    "name": "gamedig",
+    "name": "gamedigz",
     "description": "Query for the status of any game server in Node.JS",
     "keywords": [
         "srcds",
@@ -22,7 +22,7 @@
     ],
     "main": "lib/index.js",
     "author": "GameDig Contributors",
-    "version": "4.3.1",
+    "version": "0.3.2",
     "repository": {
         "type": "git",
         "url": "https://github.com/gamedig/node-gamedig.git"
