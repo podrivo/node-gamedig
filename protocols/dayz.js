@@ -1,6 +1,32 @@
 import valve from './valve.js'
 import { Buffer } from 'node:buffer'
 
+/** C0 control / non-printable garbage (misaligned binary parsed as title). */
+function dayzTitleHasControlGarbage (s) {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i)
+    if (c < 0x20 && c !== 0x09 && c !== 0x0a && c !== 0x0d) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * Some servers with no (or empty) mod payload mis-parse the A2S "game" / hostname
+ * string into the mod list with a 1-code-unit offset (missing first character).
+ */
+function dayzModTitleLooksLikeGameOrNameLeak (title, state) {
+  const game = (state?.raw?.game != null && String(state.raw.game).trim()) || ''
+  const name = (state?.name != null && String(state.name).trim()) || ''
+  for (const ref of [game, name]) {
+    if (ref.length >= 2 && title === ref.slice(1)) {
+      return true
+    }
+  }
+  return false
+}
+
 export default class dayz extends valve {
   async run (state) {
     if (!this.options.port) this.options.port = 27016
@@ -53,7 +79,7 @@ export default class dayz extends valve {
       rules[key] = reader.string()
     }
 
-    state.raw.dayzMods = this.readDayzMods(Buffer.from(dayZPayload))
+    state.raw.dayzMods = this.sanitizeDayzModsList(this.readDayzMods(Buffer.from(dayZPayload)), state)
   }
 
   processQueryInfo (state) {
@@ -109,7 +135,7 @@ export default class dayz extends valve {
 
   readDayzMods (/** Buffer */ buffer) {
     if (!buffer.length) {
-      return {}
+      return []
     }
 
     this.logger.debug('DAYZ BUFFER')
@@ -140,6 +166,48 @@ export default class dayz extends valve {
     mods.push(...this.readDayzModsSection(reader, false))
     this.logger.debug('dayz buffer rest:', reader.rest())
     return mods
+  }
+
+  /**
+   * Drop entries that are clearly mis-parsed (binary in title, empty names) or
+   * non-objects. Steam Workshop titles are never empty for listed items; empty
+   * titles usually mean padding or misalignment after the real mod list.
+   * Also drops rows where the title is the server "game" or hostname string
+   * with the first character missing (rules blob misaligned with A2S strings).
+   */
+  sanitizeDayzModsList (mods, state) {
+    if (!Array.isArray(mods)) {
+      return []
+    }
+    return mods.filter((mod) => {
+      if (mod == null || typeof mod !== 'object') {
+        return false
+      }
+      const rawTitle = mod.title
+      if (typeof rawTitle !== 'string') {
+        return false
+      }
+      const title = rawTitle.trim()
+      if (!title) {
+        return false
+      }
+      if (state != null && dayzModTitleLooksLikeGameOrNameLeak(title, state)) {
+        return false
+      }
+      if (dayzTitleHasControlGarbage(rawTitle)) {
+        return false
+      }
+      if ('workshopId' in mod) {
+        const id = mod.workshopId
+        if (typeof id !== 'number' || !Number.isFinite(id) || id <= 0) {
+          return false
+        }
+      }
+      return true
+    }).map((mod) => {
+      const title = typeof mod.title === 'string' ? mod.title.trim() : mod.title
+      return { ...mod, title }
+    })
   }
 
   readDayzModsSection (/** Reader */ reader, withHeader) {
