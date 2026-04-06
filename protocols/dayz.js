@@ -25,7 +25,7 @@ export default class dayz extends valve {
     this.logger.debug('Requesting rules ...')
 
     const b = await this.sendPacket(0x56, null, 0x45, true)
-    if (b === null && !this.options.requestRulesRequired) return // timed out - the server probably has rules disabled
+    if (b === null && !this.options.requestRulesRequired) return
 
     let dayZPayloadEnded = false
 
@@ -33,6 +33,8 @@ export default class dayz extends valve {
     const num = reader.uint(2)
     for (let i = 0; i < num; i++) {
       if (!dayZPayloadEnded) {
+        // Binary entries use 2-byte keys (index + count) followed by a null terminator.
+        // Detect them by checking for two non-zero bytes followed by 0x00.
         const one = reader.uint(1)
         const two = reader.uint(1)
         const three = reader.uint(1)
@@ -53,11 +55,12 @@ export default class dayz extends valve {
       rules[key] = reader.string()
     }
 
-    state.raw.dayzMods = this.readDayzMods(Buffer.from(dayZPayload))
+    const { mods, signatures } = this.parseDayzPayload(Buffer.from(dayZPayload))
+    state.raw.dayzMods = mods
+    state.raw.dayzSignatures = signatures
   }
 
   processQueryInfo (state) {
-    // DayZ embeds some of the server information inside the tags attribute
     if (!state.raw.tags) { return }
 
     state.raw.dlcEnabled = false
@@ -107,90 +110,126 @@ export default class dayz extends valve {
     }
   }
 
-  readDayzMods (/** Buffer */ buffer) {
-    if (!buffer.length) {
-      return {}
+  /**
+   * Decodes the DayZ byte escape encoding used to avoid 0x00 and 0xFF in
+   * null-terminated A2S_RULES string values.
+   *   0x01 0x01 → 0x01 (literal escape byte)
+   *   0x01 0x02 → 0x00 (encoded null)
+   *   0x01 0x03 → 0xFF (encoded 0xFF)
+   */
+  decodeDayzEscapes (buffer) {
+    const out = []
+    for (let i = 0; i < buffer.length; i++) {
+      if (buffer[i] === 0x01 && i + 1 < buffer.length) {
+        const next = buffer[i + 1]
+        if (next === 0x01) { out.push(0x01); i++ }
+        else if (next === 0x02) { out.push(0x00); i++ }
+        else if (next === 0x03) { out.push(0xFF); i++ }
+        else { out.push(buffer[i]) }
+      } else {
+        out.push(buffer[i])
+      }
+    }
+    return Buffer.from(out)
+  }
+
+  /**
+   * Parses the concatenated binary payload from the DayZ A2S_RULES response.
+   * The raw buffer is first escape-decoded, then parsed structurally.
+   */
+  parseDayzPayload (rawBuffer) {
+    if (!rawBuffer.length) {
+      return { mods: [], signatures: [] }
     }
 
-    this.logger.debug('DAYZ BUFFER')
+    this.logger.debug('DAYZ RAW BUFFER (before escape decoding)')
+    this.logger.debug(rawBuffer)
+
+    const buffer = this.decodeDayzEscapes(rawBuffer)
+
+    this.logger.debug('DAYZ DECODED BUFFER')
     this.logger.debug(buffer)
 
     const reader = this.reader(buffer)
-    const version = this.readDayzByte(reader)
-    const overflow = this.readDayzByte(reader)
-    const dlc1 = this.readDayzByte(reader)
-    const dlc2 = this.readDayzByte(reader)
-    this.logger.debug('version ' + version)
-    this.logger.debug('overflow ' + overflow)
-    this.logger.debug('dlc1 ' + dlc1)
-    this.logger.debug('dlc2 ' + dlc2)
-    if (dlc1) {
-      const unknown = this.readDayzUint(reader, 4) // ?
-      this.logger.debug('unknown ' + unknown)
+
+    const version = reader.uint(1)
+    this.logger.debug('payload version: ' + version)
+
+    if (version !== 2) {
+      this.logger.debug('Unsupported DayZ binary payload version: ' + version + ', skipping mod parsing')
+      return { mods: [], signatures: [] }
     }
-    if (dlc2) {
-      const unknown = this.readDayzUint(reader, 4) // ?
-      this.logger.debug('unknown ' + unknown)
-    }
-    const mods = []
-    mods.push(...this.readDayzModsSection(reader, true))
-    mods.push(...this.readDayzModsSection(reader, false))
-    this.logger.debug('dayz buffer rest:', reader.rest())
-    return mods
-  }
 
-  readDayzModsSection (/** Reader */ reader, withHeader) {
-    const out = []
-    const count = this.readDayzByte(reader)
-    this.logger.debug('dayz mod section withHeader:' + withHeader + ' count:' + count)
-    for (let i = 0; i < count; i++) {
-      if (reader.done()) break
-      const mod = {}
-      if (withHeader) {
-        mod.unknown = this.readDayzUint(reader, 4) // ?
+    const overflow = reader.uint(1)
+    this.logger.debug('overflow: ' + overflow)
 
-        // For some reason this is 4 on all of them, but doesn't exist on the last one? but only sometimes?
-        const offset = reader.offset()
-        const flag = this.readDayzByte(reader)
-        if (flag !== 4) reader.setOffset(offset)
+    // DLC Flags — 2-byte LE bitmask; each set bit has a corresponding 4-byte hash
+    const dlcFlags = reader.uint(2)
+    this.logger.debug('dlcFlags: 0x' + dlcFlags.toString(16))
 
-        mod.workshopId = this.readDayzUint(reader, 4)
+    let bits = dlcFlags
+    while (bits) {
+      if (bits & 1) {
+        const hash = reader.uint(4)
+        this.logger.debug('dlc hash: ' + hash)
       }
-      mod.title = this.readDayzString(reader)
-      this.logger.debug(mod)
-      out.push(mod)
+      bits >>>= 1
     }
-    return out
-  }
 
-  readDayzUint (reader, bytes) {
-    const out = []
-    for (let i = 0; i < bytes; i++) {
-      out.push(this.readDayzByte(reader))
-    }
-    const buf = Buffer.from(out)
-    const r2 = this.reader(buf)
-    return r2.uint(bytes)
-  }
+    // --- Mod entries ---
+    const mods = []
+    const signatures = []
+    if (reader.done()) return { mods, signatures }
 
-  readDayzByte (reader) {
-    const byte = reader.uint(1)
-    if (byte === 1) {
-      const byte2 = reader.uint(1)
-      if (byte2 === 1) return 1
-      if (byte2 === 2) return 0
-      if (byte2 === 3) return 0xff
-      return 0 // ?
-    }
-    return byte
-  }
+    const modCount = reader.uint(1)
+    this.logger.debug('mod count: ' + modCount)
 
-  readDayzString (reader) {
-    const length = this.readDayzByte(reader)
-    const out = []
-    for (let i = 0; i < length; i++) {
-      out.push(this.readDayzByte(reader))
+    for (let i = 0; i < modCount; i++) {
+      if (reader.remaining() < 5) break
+
+      const hash = reader.uint(4)
+
+      // Workshop ID Length byte — lower 4 bits give the byte count for the
+      // workshop ID field. Typically 4 (32-bit). This byte is sometimes
+      // absent on the last mod entry, requiring peek-ahead logic.
+      const savedOffset = reader.offset()
+      const lengthByte = reader.uint(1)
+      const workshopIdSize = lengthByte & 0x0F
+
+      let workshopId
+      if (workshopIdSize >= 1 && workshopIdSize <= 8) {
+        workshopId = reader.uint(Math.min(workshopIdSize, 4))
+        if (workshopIdSize > 4) reader.skip(workshopIdSize - 4)
+      } else {
+        reader.setOffset(savedOffset)
+        workshopId = reader.uint(4)
+      }
+
+      const nameLength = reader.uint(1)
+      const title = nameLength > 0 ? reader.string(nameLength) : ''
+
+      this.logger.debug({ hash, workshopId, title })
+      mods.push({ workshopId, title })
     }
-    return Buffer.from(out).toString('utf8')
+
+    // --- Signature entries (metadata — not mods) ---
+    if (!reader.done()) {
+      const sigCount = reader.uint(1)
+      this.logger.debug('signature count: ' + sigCount)
+
+      for (let i = 0; i < sigCount; i++) {
+        if (reader.done()) break
+        const nameLength = reader.uint(1)
+        const name = nameLength > 0 ? reader.string(nameLength) : ''
+        this.logger.debug('signature: ' + name)
+        signatures.push(name)
+      }
+    }
+
+    if (!reader.done()) {
+      this.logger.debug('dayz buffer remaining bytes:', reader.rest())
+    }
+
+    return { mods, signatures }
   }
 }
