@@ -92,13 +92,13 @@ export default class dayz extends valve {
         state.raw.time = tag
       }
       if (tag.startsWith('etm')) {
-        const value = parseInt(tag.replace('etm', ''))
+        const value = parseFloat(tag.replace('etm', ''))
         if (!isNaN(value)) {
           state.raw.dayAcceleration = value
         }
       }
       if (tag.startsWith('entm')) {
-        const value = parseInt(tag.replace('entm', ''))
+        const value = parseFloat(tag.replace('entm', ''))
         if (!isNaN(value)) {
           state.raw.nightAcceleration = value
         }
